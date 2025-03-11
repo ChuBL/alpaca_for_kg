@@ -8,17 +8,21 @@ import time
 import json
 from typing import Optional, Sequence, Union
 
-import openai
+from openai import AzureOpenAI
 import tqdm
-from openai import openai_object
 import copy
 
-StrOrOpenAIObject = Union[str, openai_object.OpenAIObject]
+StrOrOpenAIObject = Union[str, dict]
 
-openai_org = os.getenv("OPENAI_ORG")
-if openai_org is not None:
-    openai.organization = openai_org
-    logging.warning(f"Switching to organization: {openai_org} for OAI API key.")
+azure_endpoint = "https://ai-openaiwebui300260177230.openai.azure.com"
+api_version = "2025-01-01-preview"
+deployment_name = "gpt-4o-mini"
+
+client = AzureOpenAI(
+    azure_endpoint=azure_endpoint,
+    api_key=os.getenv("OPENAI_GPT4o_API_KEY"),
+    api_version=api_version,
+)
 
 
 @dataclasses.dataclass
@@ -31,46 +35,21 @@ class OpenAIDecodingArguments(object):
     stop: Optional[Sequence[str]] = None
     presence_penalty: float = 0.0
     frequency_penalty: float = 0.0
-    suffix: Optional[str] = None
     logprobs: Optional[int] = None
-    echo: bool = False
 
 
 def openai_completion(
     prompts: Union[str, Sequence[str], Sequence[dict[str, str]], dict[str, str]],
     decoding_args: OpenAIDecodingArguments,
-    model_name="text-davinci-003",
+    model_name="gpt-4o-mini",
     sleep_time=2,
     batch_size=1,
     max_instances=sys.maxsize,
     max_batches=sys.maxsize,
     return_text=False,
     **decoding_kwargs,
-) -> Union[Union[StrOrOpenAIObject], Sequence[StrOrOpenAIObject], Sequence[Sequence[StrOrOpenAIObject]],]:
-    """Decode with OpenAI API.
-
-    Args:
-        prompts: A string or a list of strings to complete. If it is a chat model the strings should be formatted
-            as explained here: https://github.com/openai/openai-python/blob/main/chatml.md. If it is a chat model
-            it can also be a dictionary (or list thereof) as explained here:
-            https://github.com/openai/openai-cookbook/blob/main/examples/How_to_format_inputs_to_ChatGPT_models.ipynb
-        decoding_args: Decoding arguments.
-        model_name: Model name. Can be either in the format of "org/model" or just "model".
-        sleep_time: Time to sleep once the rate-limit is hit.
-        batch_size: Number of prompts to send in a single request. Only for non chat model.
-        max_instances: Maximum number of prompts to decode.
-        max_batches: Maximum number of batches to decode. This argument will be deprecated in the future.
-        return_text: If True, return text instead of full completion object (which contains things like logprob).
-        decoding_kwargs: Additional decoding arguments. Pass in `best_of` and `logit_bias` if you need them.
-
-    Returns:
-        A completion or a list of completions.
-        Depending on return_text, return_openai_object, and decoding_args.n, the completion type can be one of
-            - a string (if return_text is True)
-            - an openai_object.OpenAIObject object (if return_text is False)
-            - a list of objects of the above types (if decoding_args.n > 1)
-    """
-    is_single_prompt = isinstance(prompts, (str, dict))
+):
+    is_single_prompt = isinstance(prompts, (str, dict, list)) and not isinstance(prompts[0], (list, dict))
     if is_single_prompt:
         prompts = [prompts]
 
@@ -94,7 +73,7 @@ def openai_completion(
         desc="prompt_batches",
         total=len(prompt_batches),
     ):
-        batch_decoding_args = copy.deepcopy(decoding_args)  # cloning the decoding_args
+        batch_decoding_args = copy.deepcopy(decoding_args)
 
         while True:
             try:
@@ -103,29 +82,39 @@ def openai_completion(
                     **batch_decoding_args.__dict__,
                     **decoding_kwargs,
                 )
-                completion_batch = openai.Completion.create(prompt=prompt_batch, **shared_kwargs)
+
+                if isinstance(prompt_batch[0], list):
+                    messages = prompt_batch[0]  # 已是消息列表时直接使用
+                elif isinstance(prompt_batch[0], str):
+                    messages = [{"role": "user", "content": prompt} for prompt in prompt_batch]
+                else:
+                    raise ValueError(f"Unexpected prompt format: {type(prompt_batch[0])}")
+
+                completion_batch = client.chat.completions.create(
+                    messages=messages,
+                    model=model_name,  # 必须明确指定
+                )
                 choices = completion_batch.choices
 
                 for choice in choices:
-                    choice["total_tokens"] = completion_batch.usage.total_tokens
+                    choice.total_tokens = completion_batch.usage.total_tokens
+                    choice.text = choice.message.content
                 completions.extend(choices)
                 break
-            except openai.error.OpenAIError as e:
+            except Exception as e:
                 logging.warning(f"OpenAIError: {e}.")
                 if "Please reduce your prompt" in str(e):
                     batch_decoding_args.max_tokens = int(batch_decoding_args.max_tokens * 0.8)
                     logging.warning(f"Reducing target length to {batch_decoding_args.max_tokens}, Retrying...")
                 else:
                     logging.warning("Hit request rate limit; retrying...")
-                    time.sleep(sleep_time)  # Annoying rate limit on requests.
+                    time.sleep(sleep_time)
 
     if return_text:
         completions = [completion.text for completion in completions]
     if decoding_args.n > 1:
-        # make completions a nested list, where each entry is a consecutive decoding_args.n of original entries.
         completions = [completions[i : i + decoding_args.n] for i in range(0, len(completions), decoding_args.n)]
     if is_single_prompt:
-        # Return non-tuple if only 1 input and 1 generation.
         (completions,) = completions
     return completions
 
