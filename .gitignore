@@ -132,3 +132,10 @@ dmypy.json
 .idea
 
 # Customized Folders
+output/*
+prompt/*
+sample/*
+test/*
+legacy/*
+
+!.gitkeep
