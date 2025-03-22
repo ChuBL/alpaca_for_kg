@@ -14,7 +14,7 @@ import copy
 
 StrOrOpenAIObject = Union[str, dict]
 
-azure_endpoint = "https://ai-openaiwebui300260177230.openai.azure.com"
+azure_endpoint = "https://ai-openaiwebui300260177230.services.ai.azure.com"
 api_version = "2025-01-01-preview"
 deployment_name = "gpt-4o-mini"
 
